@@ -1,6 +1,7 @@
 import json
 import logging
 import datetime as dt
+import pandas as pd
 import backtrader as bt
 
 from data_fetcher import get_stock_daily
@@ -23,6 +24,10 @@ def parse_event(evt):
 def run_backtest(symbol, strategy_cls, start, end, cash, **kwargs):
     """backtrader 回测"""
     df = get_stock_daily(symbol, start, end)
+    
+    # 计算买入持有基准收益率
+    buy_hold_return = (df.iloc[-1]['Close'] / df.iloc[0]['Close'] - 1) if len(df) > 0 else 0
+    
     cerebro = bt.Cerebro()
     data = bt.feeds.PandasData(dataname=df)
     cerebro.adddata(data)
@@ -31,17 +36,8 @@ def run_backtest(symbol, strategy_cls, start, end, cash, **kwargs):
     bench_start = df.index[0].strftime("%Y-%m-%d")
     bench_end = df.index[-1].strftime("%Y-%m-%d")
     
-    # 选择基准
-    if symbol.endswith(('.SH', '.SZ', '.BJ')):
-        # A股使用沪深300ETF作为基准
-        benchmark_symbol = "510300.SH"
-    elif symbol.endswith('.HK'):
-        # 港股使用恒生指数ETF作为基准
-        benchmark_symbol = "02800.HK"  # 盈富基金
-
-    else:
-        # 美股使用标普500 SPY ETF作为基准
-        benchmark_symbol = "SPY"
+    # 统一使用标普500作为基准
+    benchmark_symbol = "SPY"
     
     try:
         bench_df = get_stock_daily(benchmark_symbol, bench_start, bench_end)
@@ -66,10 +62,27 @@ def run_backtest(symbol, strategy_cls, start, end, cash, **kwargs):
     strat = res
 
     # 提取策略曲线
-    value_series = strat.observers.broker.lines.value.array
-    # 转换为Python列表以确保JSON序列化
-    value_series = [float(x) for x in value_series]
-    dates = [d.strftime("%Y-%m-%d") for d in df.index[-len(value_series):]]
+    try:
+        value_series = strat.observers.broker.lines.value.array
+        # 转换为Python列表以确保JSON序列化
+        value_series = [float(x) for x in value_series if not pd.isna(x) and x != 0]
+        # 如果没有有效数据，使用初始资金
+        if not value_series:
+            value_series = [float(cash)]
+    except (IndexError, AttributeError) as e:
+        print(f"警告：无法获取策略价值序列: {e}")
+        value_series = [float(cash)]
+    
+    # 获取策略实际运行的日期
+    # backtrader的策略可能因为指标预热期而跳过前面的一些日期
+    strategy_start_idx = len(df) - len(value_series)
+    dates = [d.strftime("%Y-%m-%d") for d in df.index[strategy_start_idx:]]
+    
+    # 确保日期和策略值长度一致
+    if len(dates) != len(value_series):
+        min_len = min(len(dates), len(value_series))
+        dates = dates[-min_len:]
+        value_series = value_series[-min_len:]
 
     # 买卖点 - 从策略中获取记录的信号
     buy_points = getattr(strat, 'buy_signals', [])
@@ -88,9 +101,24 @@ def run_backtest(symbol, strategy_cls, start, end, cash, **kwargs):
         max_dd_end = "N/A"
 
     sharpe = strat.analyzers.sharpe.get_analysis().get("sharperatio", 0)
-    ret = strat.analyzers.ret.get_analysis()
-    total_ret = ret["rtot"]
-    annual_ret = ret["rnorm100"]
+    
+    # 直接从broker计算收益率，更准确
+    final_value = cerebro.broker.getvalue()
+    total_ret = (final_value / cash) - 1
+    
+    # 计算年化收益率
+    start_date = df.index[0]
+    end_date = df.index[-1]
+    days = (end_date - start_date).days
+    years = days / 365.25
+    
+    # 年化收益率 = (1 + 总收益率)^(1/年数) - 1
+    if years > 0 and total_ret is not None:
+        annual_ret = ((1 + total_ret) ** (1 / years)) - 1
+    else:
+        annual_ret = 0.0
+    
+
 
     # 计算胜率
     trade_analysis = strat.analyzers.trades.get_analysis()
@@ -100,13 +128,14 @@ def run_backtest(symbol, strategy_cls, start, end, cash, **kwargs):
 
     summary = {
         "total_return": float(total_ret) if total_ret is not None else 0.0,
-        "annual_return": float(annual_ret) if annual_ret is not None else 0.0,
+        "annual_return": float(annual_ret),
         "max_drawdown": float(max_dd / 100) if isinstance(max_dd, (int, float)) else 0.0,
         "max_drawdown_length": int(max_dd_len) if max_dd_len is not None else 0,
         "max_drawdown_start": max_dd_start,
         "max_drawdown_end": max_dd_end,
         "sharpe": float(sharpe) if sharpe is not None else 0.0,
-        "win_rate": float(win_rate)
+        "win_rate": float(win_rate),
+        "buy_hold_return": float(buy_hold_return)  # 添加买入持有基准
     }
 
     # 处理基准数据长度匹配
@@ -150,7 +179,7 @@ if __name__ == '__main__':
     # 测试不同策略
     test_cases = [
         {
-            "name": "移动平均交叉策略 (美股ETF)",
+            "name": "移动平均交叉策略（全仓）",
             "event": {
                 "symbol": "AAPL",
                 "strategy": "SmaCross",
@@ -159,12 +188,29 @@ if __name__ == '__main__':
                 "cash": 100000,
                 "params": {
                     "fast": 10,
-                    "slow": 30
+                    "slow": 30,
+                    "position_pct": 1.0     # 全仓买入
                 }
             }
         },
         {
-            "name": "定投策略 (美股ETF)",
+            "name": "RSI策略（半仓）",
+            "event": {
+                "symbol": "TSLA",
+                "strategy": "RSI",
+                "start": "2023-01-01",
+                "end": "2024-01-01",
+                "cash": 100000,
+                "params": {
+                    "rsi_period": 14,
+                    "buy_level": 30,
+                    "sell_level": 70,
+                    "position_pct": 0.5     # 半仓买入
+                }
+            }
+        },
+        {
+            "name": "定投策略",
             "event": {
                 "symbol": "SPY",
                 "strategy": "DCA",
@@ -178,73 +224,70 @@ if __name__ == '__main__':
             }
         },
         {
-            "name": "微笑曲线策略 (美股科技ETF)",
+            "name": "网格交易策略",
             "event": {
-                "symbol": "QQQ",
-                "strategy": "SmileCurve",
-                "start": "2022-01-01",
+                "symbol": "MSFT",
+                "strategy": "Grid",
+                "start": "2023-01-01",
                 "end": "2024-01-01",
                 "cash": 100000,
                 "params": {
-                    "lookback_period": 60,   # 60天回看期
-                    "invest_period": 10,     # 每10天检查一次
-                    "base_amount": 1500,     # 基础投资金额
-                    "max_multiplier": 3.0    # 最大投资倍数
+                    "step": 0.05,           # 5%网格间距
+                    "position_size": 0.1    # 每次使用10%资金
                 }
             }
         },
         {
-            "name": "定投策略 (A股沪深300ETF)",
+            "name": "MACD策略（30%仓位）",
             "event": {
-                "symbol": "510300.SH",  # 华泰柏瑞沪深300ETF
-                "strategy": "DCA",
-                "start": "2022-01-01",
+                "symbol": "GOOGL",
+                "strategy": "MACD",
+                "start": "2023-01-01",
                 "end": "2024-01-01",
                 "cash": 100000,
                 "params": {
-                    "invest_period": 22,    # 每月定投
-                    "invest_amount": 2000   # 每次投资2000元
+                    "position_pct": 0.3     # 30%仓位
                 }
             }
         },
         {
-            "name": "微笑曲线策略 (A股创业板ETF)",
+            "name": "布林带策略（70%仓位）",
             "event": {
-                "symbol": "159915.SZ",  # 易方达创业板ETF
-                "strategy": "SmileCurve",
-                "start": "2022-01-01",
+                "symbol": "AMZN",
+                "strategy": "Boll",
+                "start": "2023-01-01",
                 "end": "2024-01-01",
                 "cash": 100000,
                 "params": {
-                    "lookback_period": 60,   # 60天回看期
-                    "invest_period": 10,     # 每10天检查一次
-                    "base_amount": 1500,     # 基础投资金额
-                    "max_multiplier": 3.0    # 最大投资倍数
+                    "bb_period": 20,
+                    "bb_dev": 2,
+                    "position_pct": 0.7     # 70%仓位
                 }
             }
         },
         {
-            "name": "买入持有策略 (A股中证500ETF)",
+            "name": "海龟交易策略（全仓）",
             "event": {
-                "symbol": "510500.SH",  # 南方中证500ETF
+                "symbol": "NVDA",
+                "strategy": "Turtle",
+                "start": "2023-01-01",
+                "end": "2024-01-01",
+                "cash": 100000,
+                "params": {
+                    "entry": 20,
+                    "exit": 10,
+                    "position_pct": 1.0     # 全仓
+                }
+            }
+        },
+        {
+            "name": "买入持有策略（基准）",
+            "event": {
+                "symbol": "SPY",
                 "strategy": "BuyHold",
                 "start": "2022-01-01",
                 "end": "2024-01-01",
                 "cash": 100000
-            }
-        },
-        {
-            "name": "定投策略-每周定投 (A股科技ETF)",
-            "event": {
-                "symbol": "515000.SH",  # 华夏中证人工智能ETF
-                "strategy": "DCA",
-                "start": "2022-01-01",
-                "end": "2024-01-01",
-                "cash": 100000,
-                "params": {
-                    "invest_period": 5,     # 每周定投（5个交易日）
-                    "invest_amount": 500    # 每次投资500元
-                }
             }
         }
     ]
@@ -263,7 +306,16 @@ if __name__ == '__main__':
         if 'params' in event and event['params']:
             print("策略参数:")
             for key, value in event['params'].items():
-                print(f"  {key}: {value}")
+                if key == 'position_pct':
+                    print(f"  仓位比例: {value:.1%}")
+                elif key == 'position_size':
+                    print(f"  每次交易资金: {value:.1%}")
+                elif key in ['invest_amount', 'base_amount', 'initial_target']:
+                    print(f"  {key}: ${value:,}")
+                elif key in ['target_growth']:
+                    print(f"  {key}: {value:.1%}")
+                else:
+                    print(f"  {key}: {value}")
         else:
             print("策略参数: 使用默认参数")
         
@@ -287,6 +339,41 @@ if __name__ == '__main__':
                 sell_count = len(chart['sell_points'])
                 print(f"买入次数: {buy_count}")
                 print(f"卖出次数: {sell_count}")
+                
+                # 计算交易频率
+                days = len(chart['dates'])
+                if days > 0:
+                    trade_frequency = (buy_count + sell_count) / days * 252  # 年化交易频率
+                    print(f"年化交易频率: {trade_frequency:.1f}次")
+                
+                # 显示资金管理参数（如果有）
+                params = event.get('params', {})
+                if params.get('position_pct') and params.get('position_pct') != 1.0:
+                    print(f"资金管理: 每次使用{params['position_pct']:.1%}资金")
+                
+                # 添加数据验证信息，提升可信度
+                print(f"\n📈 数据验证:")
+                print(f"回测期间: {event['start']} 至 {event['end']}")
+                print(f"交易日数: {days}天")
+                if chart['strategy_values']:
+                    initial_value = chart['strategy_values'][0] if chart['strategy_values'] else event['cash']
+                    final_value = chart['strategy_values'][-1] if chart['strategy_values'] else event['cash']
+                    print(f"初始价值: ${initial_value:,.2f}")
+                    print(f"最终价值: ${final_value:,.2f}")
+                    calculated_return = (final_value / initial_value - 1)
+                    print(f"计算验证: {calculated_return:.2%} (应与总收益率一致)")
+                
+                # 添加基准对比
+                buy_hold_ret = summary.get('buy_hold_return', 0)
+                strategy_ret = summary['total_return']
+                print(f"\n📊 基准对比:")
+                print(f"买入持有收益: {buy_hold_ret:.2%}")
+                print(f"策略收益: {strategy_ret:.2%}")
+                excess_return = strategy_ret - buy_hold_ret
+                if excess_return > 0:
+                    print(f"✅ 策略跑赢基准 +{excess_return:.2%}")
+                else:
+                    print(f"❌ 策略跑输基准 {excess_return:.2%}")
                 
             else:
                 error_data = json.loads(result['body'])

@@ -1,4 +1,5 @@
-import akshare as ak, pandas as pd
+import akshare as ak
+import pandas as pd
 from datetime import datetime, timedelta
 import time
 import logging
@@ -97,8 +98,12 @@ def _validate_symbol_format(symbol: str) -> bool:
 
 
 def _fetch_a_stock(symbol: str, start: str, end: str) -> pd.DataFrame:
-    """获取A股数据"""
+    """获取A股数据 - 仅支持股票，不支持ETF"""
     code, ex = symbol.split(".")
+    
+    # 检查是否为ETF（通常以5开头的6位数字）
+    if code.startswith('5') and len(code) == 6:
+        raise RuntimeError(f"不支持ETF标的 {symbol}，请使用股票代码")
     
     try:
         df = ak.stock_zh_a_hist(
@@ -129,7 +134,8 @@ def _fetch_a_stock(symbol: str, start: str, end: str) -> pd.DataFrame:
         df["Date"] = pd.to_datetime(df["Date"])
         df.set_index("Date", inplace=True)
         
-        return df[["Open", "High", "Low", "Close", "Volume"]].sort_index()
+        ohlcv_cols = ["Open", "High", "Low", "Close", "Volume"]
+        return df[ohlcv_cols].sort_index()
         
     except Exception as e:
         raise RuntimeError(f"获取A股 {symbol} 数据失败: {e}")
@@ -172,7 +178,6 @@ def _fetch_hk_stock(symbol: str, start: str, end: str) -> pd.DataFrame:
         
     except Exception as e:
         raise RuntimeError(f"获取港股 {symbol} 数据失败: {e}")
-
 
 
 def _fetch_us_stock(symbol: str, start: str, end: str) -> pd.DataFrame:
@@ -227,10 +232,10 @@ def _fetch_us_stock(symbol: str, start: str, end: str) -> pd.DataFrame:
 if __name__ == '__main__':
     # 测试用例
     test_cases = [
-        ('SPY', '2023-12-20', '2023-12-22'),
-        # ('600519.SH', '2023-12-20', '2023-12-22'),
-        # ('00700.HK', '2023-12-20', '2023-12-22'),
-        ('510300.SH', '2023-12-01', '2023-12-31'),  # 沪深300ETF
+        ('SPY', '2023-12-20', '2023-12-22'),        # 美股
+        ('600519.SH', '2023-12-20', '2023-12-22'),  # A股贵州茅台
+        ('000700.HK', '2023-12-20', '2025-12-22'),  # A股贵州茅台
+        ('002594.SZ', '2023-12-20', '2023-12-22'),  # A股比亚迪
     ]
     
     for symbol, start, end in test_cases:

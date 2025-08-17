@@ -4,6 +4,10 @@ import backtrader as bt
 class BaseStrategy(bt.Strategy):
     """基础策略类，用于记录买卖点"""
     
+    params = dict(
+        position_pct=1.0,  # 每次买入使用的资金比例，1.0表示全仓，0.5表示半仓
+    )
+    
     def __init__(self):
         super().__init__()
         self.buy_signals = []
@@ -38,6 +42,11 @@ class BaseStrategy(bt.Strategy):
                 "price": self.data.close[0]
             })
         return result
+    
+    def calculate_position_size(self):
+        """计算买入数量"""
+        available_cash = self.broker.getcash() * self.p.position_pct
+        return available_cash / self.data.close[0]
 
 class SmaCross(BaseStrategy):
     params = dict(fast=10, slow=30)
@@ -49,15 +58,21 @@ class SmaCross(BaseStrategy):
         self.crossover = bt.ind.CrossOver(self.fast_ma, self.slow_ma)
     
     def next(self):
+        # 确保有足够的数据进行计算
+        if len(self) < self.p.slow:
+            return
+            
         if not self.position and self.crossover > 0:
-            self.buy(size=1)
+            size = self.calculate_position_size()
+            self.buy(size=size)
         elif self.position and self.crossover < 0:
             self.close()
 
 class BuyHold(BaseStrategy):
     def next(self):
         if not self.position:
-            self.buy(size=1)
+            size = self.calculate_position_size()
+            self.buy(size=size)
 
 class RSI(BaseStrategy):
     params = dict(rsi_period=14, buy_level=30, sell_level=70)
@@ -65,8 +80,13 @@ class RSI(BaseStrategy):
         super().__init__()
         self.rsi = bt.ind.RSI(self.data.close, period=self.p.rsi_period)
     def next(self):
+        # 确保RSI指标有足够数据
+        if len(self) < self.p.rsi_period:
+            return
+            
         if self.rsi < self.p.buy_level and not self.position:
-            self.buy(size=1)
+            size = self.calculate_position_size()
+            self.buy(size=size)
         elif self.rsi > self.p.sell_level and self.position:
             self.close()
 
@@ -75,8 +95,13 @@ class MACD(BaseStrategy):
         super().__init__()
         self.macd = bt.ind.MACD()
     def next(self):
+        # MACD需要足够的数据
+        if len(self) < 35:  # MACD默认需要约35个数据点
+            return
+            
         if not self.position and self.macd.macd > self.macd.signal:
-            self.buy(size=1)
+            size = self.calculate_position_size()
+            self.buy(size=size)
         elif self.position and self.macd.macd < self.macd.signal:
             self.close()
 
@@ -86,8 +111,13 @@ class Boll(BaseStrategy):
         super().__init__()
         self.bb = bt.ind.BollingerBands(period=self.p.bb_period, devfactor=self.p.bb_dev)
     def next(self):
+        # 布林带需要足够的数据
+        if len(self) < self.p.bb_period:
+            return
+            
         if not self.position and self.data.close < self.bb.lines.bot:
-            self.buy(size=1)
+            size = self.calculate_position_size()
+            self.buy(size=size)
         elif self.position and self.data.close > self.bb.lines.top:
             self.close()
 
@@ -98,13 +128,18 @@ class Turtle(BaseStrategy):
         self.highest = bt.ind.Highest(self.data.high, period=self.p.entry)
         self.lowest  = bt.ind.Lowest(self.data.low, period=self.p.exit)
     def next(self):
+        # 海龟策略需要足够的数据
+        if len(self) < max(self.p.entry, self.p.exit):
+            return
+            
         if not self.position and self.data.close > self.highest[-1]:
-            self.buy(size=1)
+            size = self.calculate_position_size()
+            self.buy(size=size)
         elif self.position and self.data.close < self.lowest[-1]:
             self.close()
 
 class Grid(BaseStrategy):
-    params = dict(step=0.05)
+    params = dict(step=0.05, position_size=0.1)  # 每次使用10%资金
     def __init__(self):
         super().__init__()
         self.last_price = None
@@ -113,14 +148,22 @@ class Grid(BaseStrategy):
         if self.last_price is None:
             self.last_price = price
             return
+        
+        # 计算每次交易的资金量
+        trade_value = self.broker.getcash() * self.p.position_size
+        trade_size = trade_value / price
+        
         if not self.position:
-            self.buy(size=1)
+            self.buy(size=trade_size)
             self.last_price = price
         elif price >= self.last_price * (1+self.p.step):
-            self.sell(size=1)
+            # 网格卖出，卖出部分持仓
+            sell_size = min(trade_size, self.position.size)
+            self.sell(size=sell_size)
             self.last_price = price
         elif price <= self.last_price * (1-self.p.step):
-            self.buy(size=1)
+            # 网格买入
+            self.buy(size=trade_size)
             self.last_price = price
 
 class DualThrust(BaseStrategy):
@@ -136,7 +179,8 @@ class DualThrust(BaseStrategy):
         buy  = self.data.open[0] + self.p.k1 * r
         sell = self.data.open[0] - self.p.k2 * r
         if not self.position and self.data.close[0] > buy:
-            self.buy(size=1)
+            size = self.calculate_position_size()
+            self.buy(size=size)
         elif self.position and self.data.close[0] < sell:
             self.close()
 
