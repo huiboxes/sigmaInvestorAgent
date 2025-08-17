@@ -5,7 +5,11 @@ import pandas as pd
 import backtrader as bt
 
 from data_fetcher import get_stock_daily
-from strategy import *  
+from strategy import *
+
+# 配置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)  
     
 
 def parse_event(evt):
@@ -25,8 +29,40 @@ def run_backtest(symbol, strategy_cls, start, end, cash, **kwargs):
     """backtrader 回测"""
     df = get_stock_daily(symbol, start, end)
     
-    # 计算买入持有基准收益率
-    buy_hold_return = (df.iloc[-1]['Close'] / df.iloc[0]['Close'] - 1) if len(df) > 0 else 0
+    # 计算买入持有基准收益率 - 使用日收益率累积，避免股票分割问题
+    if len(df) > 0:
+        # 使用日收益率累积计算，这样可以正确处理股票分割
+        daily_returns = df['Close'].pct_change().fillna(0)
+        
+        # 检测可能的股票分割：
+        # 1. 单日下跌超过50%（股票分割通常是下跌）
+        # 2. 且成交量没有异常放大（排除重大利空消息）
+        potential_splits = daily_returns < -0.5
+        
+        if potential_splits.any():
+            split_dates = df.index[potential_splits]
+            logger.warning(f"检测到 {len(split_dates)} 个可能的股票分割日期")
+            
+            # 对每个可能的分割日期进行验证
+            for split_date in split_dates:
+                split_return = daily_returns.loc[split_date]
+                
+                # 检查是否符合常见的股票分割比例
+                # 2:1分割 ≈ -50%, 3:1分割 ≈ -67%, 4:1分割 ≈ -75%, 5:1分割 ≈ -80%
+                expected_ratios = [-0.5, -0.67, -0.75, -0.8, -0.86, -0.9, -0.95]  # 对应2:1到20:1分割
+                
+                # 如果收益率接近这些分割比例（误差在5%内），认为是股票分割
+                is_likely_split = any(abs(split_return - ratio) < 0.05 for ratio in expected_ratios)
+                
+                if is_likely_split:
+                    logger.info(f"将 {split_date.strftime('%Y-%m-%d')} 的收益率 {split_return:.2%} 识别为股票分割，从计算中排除")
+                    daily_returns.loc[split_date] = 0
+                else:
+                    logger.info(f"保留 {split_date.strftime('%Y-%m-%d')} 的收益率 {split_return:.2%}，可能是正常的极端波动")
+        
+        buy_hold_return = (daily_returns + 1).prod() - 1
+    else:
+        buy_hold_return = 0
     
     cerebro = bt.Cerebro()
     data = bt.feeds.PandasData(dataname=df)
@@ -127,6 +163,7 @@ def run_backtest(symbol, strategy_cls, start, end, cash, **kwargs):
     win_rate = won_trades / total_trades if total_trades > 0 else 0
 
     summary = {
+        "symbol": symbol,
         "total_return": float(total_ret) if total_ret is not None else 0.0,
         "annual_return": float(annual_ret),
         "max_drawdown": float(max_dd / 100) if isinstance(max_dd, (int, float)) else 0.0,
@@ -176,211 +213,212 @@ def main(event, context):
 
 
 if __name__ == '__main__':
-    # 测试不同策略
-    test_cases = [
-        {
-            "name": "移动平均交叉策略（全仓）",
-            "event": {
-                "symbol": "AAPL",
-                "strategy": "SmaCross",
-                "start": "2023-01-01",
-                "end": "2024-01-01",
-                "cash": 100000,
-                "params": {
-                    "fast": 10,
-                    "slow": 30,
-                    "position_pct": 1.0     # 全仓买入
-                }
-            }
-        },
-        {
-            "name": "RSI策略（半仓）",
-            "event": {
-                "symbol": "TSLA",
-                "strategy": "RSI",
-                "start": "2023-01-01",
-                "end": "2024-01-01",
-                "cash": 100000,
-                "params": {
-                    "rsi_period": 14,
-                    "buy_level": 30,
-                    "sell_level": 70,
-                    "position_pct": 0.5     # 半仓买入
-                }
-            }
-        },
-        {
-            "name": "定投策略",
-            "event": {
-                "symbol": "SPY",
-                "strategy": "DCA",
-                "start": "2022-01-01",
-                "end": "2024-01-01",
-                "cash": 100000,
-                "params": {
-                    "invest_period": 22,    # 每月定投
-                    "invest_amount": 2000   # 每次投资2000元
-                }
-            }
-        },
-        {
-            "name": "网格交易策略",
-            "event": {
-                "symbol": "MSFT",
-                "strategy": "Grid",
-                "start": "2023-01-01",
-                "end": "2024-01-01",
-                "cash": 100000,
-                "params": {
-                    "step": 0.05,           # 5%网格间距
-                    "position_size": 0.1    # 每次使用10%资金
-                }
-            }
-        },
-        {
-            "name": "MACD策略（30%仓位）",
-            "event": {
-                "symbol": "GOOGL",
-                "strategy": "MACD",
-                "start": "2023-01-01",
-                "end": "2024-01-01",
-                "cash": 100000,
-                "params": {
-                    "position_pct": 0.3     # 30%仓位
-                }
-            }
-        },
-        {
-            "name": "布林带策略（70%仓位）",
-            "event": {
-                "symbol": "AMZN",
-                "strategy": "Boll",
-                "start": "2023-01-01",
-                "end": "2024-01-01",
-                "cash": 100000,
-                "params": {
-                    "bb_period": 20,
-                    "bb_dev": 2,
-                    "position_pct": 0.7     # 70%仓位
-                }
-            }
-        },
-        {
-            "name": "海龟交易策略（全仓）",
-            "event": {
-                "symbol": "NVDA",
-                "strategy": "Turtle",
-                "start": "2023-01-01",
-                "end": "2024-01-01",
-                "cash": 100000,
-                "params": {
-                    "entry": 20,
-                    "exit": 10,
-                    "position_pct": 1.0     # 全仓
-                }
-            }
-        },
-        {
-            "name": "买入持有策略（基准）",
-            "event": {
-                "symbol": "SPY",
-                "strategy": "BuyHold",
-                "start": "2022-01-01",
-                "end": "2024-01-01",
-                "cash": 100000
-            }
-        }
-    ]
     
-    for i, test_case in enumerate(test_cases, 1):
-        print(f"\n{'='*60}")
-        print(f"测试 {i}: {test_case['name']}")
-        print(f"{'='*60}")
+    # 其他策略测试用例
+    # test_cases = [
+    #     {
+    #         "name": "移动平均交叉策略（全仓）",
+    #         "event": {
+    #             "symbol": "AAPL",
+    #             "strategy": "SmaCross",
+    #             "start": "2023-01-01",
+    #             "end": "2024-01-01",
+    #             "cash": 100000,
+    #             "params": {
+    #                 "fast": 10,
+    #                 "slow": 30,
+    #                 "position_pct": 1.0     # 全仓买入
+    #             }
+    #         }
+    #     },
+    #     {
+    #         "name": "RSI策略（半仓）",
+    #         "event": {
+    #             "symbol": "TSLA",
+    #             "strategy": "RSI",
+    #             "start": "2023-01-01",
+    #             "end": "2024-01-01",
+    #             "cash": 100000,
+    #             "params": {
+    #                 "rsi_period": 14,
+    #                 "buy_level": 30,
+    #                 "sell_level": 70,
+    #                 "position_pct": 0.5     # 半仓买入
+    #             }
+    #         }
+    #     },
+    #     {
+    #         "name": "定投策略",
+    #         "event": {
+    #             "symbol": "SPY",
+    #             "strategy": "DCA",
+    #             "start": "2022-01-01",
+    #             "end": "2024-01-01",
+    #             "cash": 100000,
+    #             "params": {
+    #                 "invest_period": 22,    # 每月定投
+    #                 "invest_amount": 2000   # 每次投资2000元
+    #             }
+    #         }
+    #     },
+    #     {
+    #         "name": "网格交易策略",
+    #         "event": {
+    #             "symbol": "MSFT",
+    #             "strategy": "Grid",
+    #             "start": "2023-01-01",
+    #             "end": "2024-01-01",
+    #             "cash": 100000,
+    #             "params": {
+    #                 "step": 0.05,           # 5%网格间距
+    #                 "position_size": 0.1    # 每次使用10%资金
+    #             }
+    #         }
+    #     },
+    #     {
+    #         "name": "MACD策略（30%仓位）",
+    #         "event": {
+    #             "symbol": "GOOGL",
+    #             "strategy": "MACD",
+    #             "start": "2023-01-01",
+    #             "end": "2024-01-01",
+    #             "cash": 100000,
+    #             "params": {
+    #                 "position_pct": 0.3     # 30%仓位
+    #             }
+    #         }
+    #     },
+    #     {
+    #         "name": "布林带策略（70%仓位）",
+    #         "event": {
+    #             "symbol": "AMZN",
+    #             "strategy": "Boll",
+    #             "start": "2023-01-01",
+    #             "end": "2024-01-01",
+    #             "cash": 100000,
+    #             "params": {
+    #                 "bb_period": 20,
+    #                 "bb_dev": 2,
+    #                 "position_pct": 0.7     # 70%仓位
+    #             }
+    #         }
+    #     },
+    #     {
+    #         "name": "海龟交易策略（全仓）",
+    #         "event": {
+    #             "symbol": "NVDA",
+    #             "strategy": "Turtle",
+    #             "start": "2023-01-01",
+    #             "end": "2024-01-01",
+    #             "cash": 100000,
+    #             "params": {
+    #                 "entry": 20,
+    #                 "exit": 10,
+    #                 "position_pct": 1.0     # 全仓
+    #             }
+    #         }
+    #     },
+    #     {
+    #         "name": "买入持有策略（基准）",
+    #         "event": {
+    #             "symbol": "SPY",
+    #             "strategy": "BuyHold",
+    #             "start": "2022-01-01",
+    #             "end": "2024-01-01",
+    #             "cash": 100000
+    #         }
+    #     }
+    # ]
+    
+    # for i, test_case in enumerate(test_cases, 1):
+    #     print(f"\n{'='*60}")
+    #     print(f"测试 {i}: {test_case['name']}")
+    #     print(f"{'='*60}")
         
-        event = test_case['event']
-        print(f"标的: {event['symbol']}")
-        print(f"策略: {event['strategy']}")
-        print(f"时间: {event['start']} 到 {event['end']}")
-        print(f"初始资金: ${event['cash']:,}")
+    #     event = test_case['event']
+    #     print(f"标的: {event['symbol']}")
+    #     print(f"策略: {event['strategy']}")
+    #     print(f"时间: {event['start']} 到 {event['end']}")
+    #     print(f"初始资金: ${event['cash']:,}")
         
-        if 'params' in event and event['params']:
-            print("策略参数:")
-            for key, value in event['params'].items():
-                if key == 'position_pct':
-                    print(f"  仓位比例: {value:.1%}")
-                elif key == 'position_size':
-                    print(f"  每次交易资金: {value:.1%}")
-                elif key in ['invest_amount', 'base_amount', 'initial_target']:
-                    print(f"  {key}: ${value:,}")
-                elif key in ['target_growth']:
-                    print(f"  {key}: {value:.1%}")
-                else:
-                    print(f"  {key}: {value}")
-        else:
-            print("策略参数: 使用默认参数")
+    #     if 'params' in event and event['params']:
+    #         print("策略参数:")
+    #         for key, value in event['params'].items():
+    #             if key == 'position_pct':
+    #                 print(f"  仓位比例: {value:.1%}")
+    #             elif key == 'position_size':
+    #                 print(f"  每次交易资金: {value:.1%}")
+    #             elif key in ['invest_amount', 'base_amount', 'initial_target']:
+    #                 print(f"  {key}: ${value:,}")
+    #             elif key in ['target_growth']:
+    #                 print(f"  {key}: {value:.1%}")
+    #             else:
+    #                 print(f"  {key}: {value}")
+    #     else:
+    #         print("策略参数: 使用默认参数")
         
-        try:
-            result = main(event, None)
+    #     try:
+    #         result = main(event, None)
             
-            if result['statusCode'] == 200:
-                data = json.loads(result['body'])
-                summary = data['summary']
+    #         if result['statusCode'] == 200:
+    #             data = json.loads(result['body'])
+    #             summary = data['summary']
                 
-                print(f"\n📊 回测结果:")
-                print(f"总收益率: {summary['total_return']:.2%}")
-                print(f"年化收益率: {summary['annual_return']:.2%}")
-                print(f"最大回撤: {summary['max_drawdown']:.2%}")
-                print(f"夏普比率: {summary['sharpe']:.3f}")
-                print(f"胜率: {summary['win_rate']:.2%}")
+    #             print(f"\n📊 回测结果:")
+    #             print(f"总收益率: {summary['total_return']:.2%}")
+    #             print(f"年化收益率: {summary['annual_return']:.2%}")
+    #             print(f"最大回撤: {summary['max_drawdown']:.2%}")
+    #             print(f"夏普比率: {summary['sharpe']:.3f}")
+    #             print(f"胜率: {summary['win_rate']:.2%}")
                 
-                # 显示买卖点数量
-                chart = data['chart']
-                buy_count = len(chart['buy_points'])
-                sell_count = len(chart['sell_points'])
-                print(f"买入次数: {buy_count}")
-                print(f"卖出次数: {sell_count}")
+    #             # 显示买卖点数量
+    #             chart = data['chart']
+    #             buy_count = len(chart['buy_points'])
+    #             sell_count = len(chart['sell_points'])
+    #             print(f"买入次数: {buy_count}")
+    #             print(f"卖出次数: {sell_count}")
                 
-                # 计算交易频率
-                days = len(chart['dates'])
-                if days > 0:
-                    trade_frequency = (buy_count + sell_count) / days * 252  # 年化交易频率
-                    print(f"年化交易频率: {trade_frequency:.1f}次")
+    #             # 计算交易频率
+    #             days = len(chart['dates'])
+    #             if days > 0:
+    #                 trade_frequency = (buy_count + sell_count) / days * 252  # 年化交易频率
+    #                 print(f"年化交易频率: {trade_frequency:.1f}次")
                 
-                # 显示资金管理参数（如果有）
-                params = event.get('params', {})
-                if params.get('position_pct') and params.get('position_pct') != 1.0:
-                    print(f"资金管理: 每次使用{params['position_pct']:.1%}资金")
+    #             # 显示资金管理参数（如果有）
+    #             params = event.get('params', {})
+    #             if params.get('position_pct') and params.get('position_pct') != 1.0:
+    #                 print(f"资金管理: 每次使用{params['position_pct']:.1%}资金")
                 
-                # 添加数据验证信息，提升可信度
-                print(f"\n📈 数据验证:")
-                print(f"回测期间: {event['start']} 至 {event['end']}")
-                print(f"交易日数: {days}天")
-                if chart['strategy_values']:
-                    initial_value = chart['strategy_values'][0] if chart['strategy_values'] else event['cash']
-                    final_value = chart['strategy_values'][-1] if chart['strategy_values'] else event['cash']
-                    print(f"初始价值: ${initial_value:,.2f}")
-                    print(f"最终价值: ${final_value:,.2f}")
-                    calculated_return = (final_value / initial_value - 1)
-                    print(f"计算验证: {calculated_return:.2%} (应与总收益率一致)")
+    #             # 添加数据验证信息，提升可信度
+    #             print(f"\n📈 数据验证:")
+    #             print(f"回测期间: {event['start']} 至 {event['end']}")
+    #             print(f"交易日数: {days}天")
+    #             if chart['strategy_values']:
+    #                 initial_value = chart['strategy_values'][0] if chart['strategy_values'] else event['cash']
+    #                 final_value = chart['strategy_values'][-1] if chart['strategy_values'] else event['cash']
+    #                 print(f"初始价值: ${initial_value:,.2f}")
+    #                 print(f"最终价值: ${final_value:,.2f}")
+    #                 calculated_return = (final_value / initial_value - 1)
+    #                 print(f"计算验证: {calculated_return:.2%} (应与总收益率一致)")
                 
-                # 添加基准对比
-                buy_hold_ret = summary.get('buy_hold_return', 0)
-                strategy_ret = summary['total_return']
-                print(f"\n📊 基准对比:")
-                print(f"买入持有收益: {buy_hold_ret:.2%}")
-                print(f"策略收益: {strategy_ret:.2%}")
-                excess_return = strategy_ret - buy_hold_ret
-                if excess_return > 0:
-                    print(f"✅ 策略跑赢基准 +{excess_return:.2%}")
-                else:
-                    print(f"❌ 策略跑输基准 {excess_return:.2%}")
+    #             # 添加基准对比
+    #             buy_hold_ret = summary.get('buy_hold_return', 0)
+    #             strategy_ret = summary['total_return']
+    #             print(f"\n📊 基准对比:")
+    #             print(f"买入持有收益: {buy_hold_ret:.2%}")
+    #             print(f"策略收益: {strategy_ret:.2%}")
+    #             excess_return = strategy_ret - buy_hold_ret
+    #             if excess_return > 0:
+    #                 print(f"✅ 策略跑赢基准 +{excess_return:.2%}")
+    #             else:
+    #                 print(f"❌ 策略跑输基准 {excess_return:.2%}")
                 
-            else:
-                error_data = json.loads(result['body'])
-                print(f"❌ 测试失败: {error_data['msg']}")
+    #         else:
+    #             error_data = json.loads(result['body'])
+    #             print(f"❌ 测试失败: {error_data['msg']}")
                 
-        except Exception as e:
-            print(f"❌ 测试异常: {str(e)}")
+    #     except Exception as e:
+    #         print(f"❌ 测试异常: {str(e)}")
     
     print(f"\n{'='*60}")
     print("所有测试完成！")

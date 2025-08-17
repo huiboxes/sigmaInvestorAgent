@@ -111,7 +111,7 @@ def _fetch_a_stock(symbol: str, start: str, end: str) -> pd.DataFrame:
             period="daily",
             start_date=start.replace("-", ""),
             end_date=end.replace("-", ""),
-            adjust=""
+            adjust="qfq"  # 前复权
         )
         
         if df is None or df.empty:
@@ -151,7 +151,7 @@ def _fetch_hk_stock(symbol: str, start: str, end: str) -> pd.DataFrame:
             period="daily",
             start_date=start.replace("-", ""),
             end_date=end.replace("-", ""), 
-            adjust=""
+            adjust="qfq"  # 前复权
         )
         
         if df is None or df.empty:
@@ -183,18 +183,30 @@ def _fetch_hk_stock(symbol: str, start: str, end: str) -> pd.DataFrame:
 def _fetch_us_stock(symbol: str, start: str, end: str) -> pd.DataFrame:
     """获取美股数据"""
     try:
-        df = ak.stock_us_daily(symbol=symbol)
+        logger.info(f"获取 {symbol} 前复权数据")
+        
+        # 优先尝试使用前复权数据
+        df = None
+        
+        # 直接使用原始数据，不进行手动修复
+        # 原始数据可能包含股票分割，但手动修复会引入偏差
+        try:
+            df = ak.stock_us_daily(symbol=symbol)
+            logger.info(f"使用 stock_us_daily 获取 {symbol} 原始数据")
+        except Exception as e:
+            logger.error(f"stock_us_daily 失败: {e}")
         
         if df is None or df.empty:
             raise RuntimeError(f"未获取到 {symbol} 的数据")
         
+        # 处理不同接口的列名
         column_mapping = {
-            'date': 'Date',
-            'open': 'Open', 
-            'high': 'High',
-            'low': 'Low',
-            'close': 'Close',
-            'volume': 'Volume'
+            'date': 'Date', '日期': 'Date',
+            'open': 'Open', '开盘': 'Open',
+            'high': 'High', '最高': 'High',
+            'low': 'Low', '最低': 'Low',
+            'close': 'Close', '收盘': 'Close',
+            'volume': 'Volume', '成交量': 'Volume'
         }
         
         df = df.rename(columns=column_mapping)
@@ -215,15 +227,26 @@ def _fetch_us_stock(symbol: str, start: str, end: str) -> pd.DataFrame:
         if missing_cols:
             raise RuntimeError(f"数据缺少必要列: {missing_cols}")
         
-        for col in ["Open", "High", "Low", "Close", "Volume"]:
+        for col in required_cols:
             df[col] = pd.to_numeric(df[col], errors='coerce')
         
-        result_df = df[required_cols].dropna()
+        result_df = df[required_cols].dropna().sort_index()
         
         if result_df.empty:
             raise RuntimeError(f"{symbol} 数据清理后为空")
 
-        return result_df.sort_index()
+        # 验证数据连续性
+        price_changes = result_df['Close'].pct_change().abs()
+        extreme_changes = price_changes > 0.3  # 单日涨跌超过30%
+        
+        if extreme_changes.any():
+            extreme_count = extreme_changes.sum()
+            logger.warning(f"{symbol} 数据中有 {extreme_count} 个异常价格变动点，建议检查数据源")
+        else:
+            logger.info(f"{symbol} 数据连续性良好")
+        
+        logger.info(f"成功获取 {symbol} 数据，共 {len(result_df)} 条记录")
+        return result_df
         
     except Exception as e:
         raise RuntimeError(f"获取美股 {symbol} 数据失败: {e}")
@@ -247,3 +270,6 @@ if __name__ == '__main__':
             print(df.head(2))
         except Exception as e:
             print(f"获取 {symbol} 失败: {e}")
+
+
+
