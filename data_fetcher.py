@@ -11,11 +11,11 @@ logger = logging.getLogger(__name__)
 
 def get_stock_daily(symbol: str, start: Optional[str] = None, end: Optional[str] = None, max_retries: int = 3, retry_delay: float = 1.0) -> pd.DataFrame:
     """
-    获取股票日线数据，支持A股、港股、美股
+    获取股票/ETF日线数据，支持A股、港股、美股
     
     Args:
-        symbol: 股票代码
-            A股：600519.SH / 000001.SZ / 835640.BJ
+        symbol: 股票/ETF代码
+            A股：600519.SH / 000001.SZ / 835640.BJ / 510300.SH(ETF)
             港股：00700.HK
             美股：AAPL / SPY
         start: 开始日期 (YYYY-MM-DD)，默认为3年前
@@ -83,7 +83,7 @@ def get_stock_daily(symbol: str, start: Optional[str] = None, end: Optional[str]
 
 
 def _validate_symbol_format(symbol: str) -> bool:
-    """验证股票代码格式"""
+    """验证股票/ETF代码格式"""
     if symbol.endswith((".SH", ".SZ", ".BJ")):
         code = symbol[:-3]
         return code.isdigit() and len(code) == 6
@@ -174,6 +174,7 @@ def _fetch_hk_stock(symbol: str, start: str, end: str) -> pd.DataFrame:
         raise RuntimeError(f"获取港股 {symbol} 数据失败: {e}")
 
 
+
 def _fetch_us_stock(symbol: str, start: str, end: str) -> pd.DataFrame:
     """获取美股数据"""
     try:
@@ -216,7 +217,7 @@ def _fetch_us_stock(symbol: str, start: str, end: str) -> pd.DataFrame:
         
         if result_df.empty:
             raise RuntimeError(f"{symbol} 数据清理后为空")
-            
+
         return result_df.sort_index()
         
     except Exception as e:
@@ -226,9 +227,10 @@ def _fetch_us_stock(symbol: str, start: str, end: str) -> pd.DataFrame:
 if __name__ == '__main__':
     # 测试用例
     test_cases = [
-        ('AAPL', '2023-12-20', '2023-12-22'),
-        ('600519.SH', '2023-12-20', '2023-12-22'),
-        ('00700.HK', '2023-12-20', '2023-12-22'),
+        ('SPY', '2023-12-20', '2023-12-22'),
+        # ('600519.SH', '2023-12-20', '2023-12-22'),
+        # ('00700.HK', '2023-12-20', '2023-12-22'),
+        ('510300.SH', '2023-12-01', '2023-12-31'),  # 沪深300ETF
     ]
     
     for symbol, start, end in test_cases:

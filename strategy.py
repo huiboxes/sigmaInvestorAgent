@@ -139,3 +139,146 @@ class DualThrust(BaseStrategy):
             self.buy(size=1)
         elif self.position and self.data.close[0] < sell:
             self.close()
+
+class DCA(BaseStrategy):
+    """定投策略 (Dollar Cost Averaging)
+    
+    每隔固定周期投入固定金额，不管市场涨跌。
+    这是最适合普通投资者的长期投资策略。
+    
+    参数说明：
+    - invest_period: 投资周期（交易日）
+      * 5 = 每周定投
+      * 10 = 每两周定投  
+      * 22 = 每月定投（默认）
+      * 66 = 每季度定投
+    - invest_amount: 每次投资金额
+    """
+    params = dict(
+        invest_period=22,  # 投资周期（交易日），22天约等于1个月
+        invest_amount=1000  # 每次投资金额
+    )
+    
+    def __init__(self):
+        super().__init__()
+        self.day_count = 0
+        self.total_invested = 0
+        
+    def next(self):
+        self.day_count += 1
+        
+        # 每隔指定周期进行定投
+        if self.day_count % self.p.invest_period == 0:
+            # 计算可以买入的份额（基于当前价格）
+            shares_to_buy = self.p.invest_amount / self.data.close[0]
+            self.buy(size=shares_to_buy)
+            self.total_invested += self.p.invest_amount
+
+
+class ValueAveraging(BaseStrategy):
+    """价值平均策略 (Value Averaging)
+    
+    设定目标价值增长路径，根据实际价值与目标价值的差异来调整投资金额。
+    当实际价值低于目标时加大投资，高于目标时减少投资或卖出。
+    """
+    params = dict(
+        check_period=22,  # 检查周期（交易日）
+        target_growth=0.01,  # 目标月增长率 1%
+        initial_target=10000  # 初始目标价值
+    )
+    
+    def __init__(self):
+        super().__init__()
+        self.day_count = 0
+        self.period_count = 0
+        self.target_value = self.p.initial_target
+        
+    def next(self):
+        self.day_count += 1
+        
+        if self.day_count % self.p.check_period == 0:
+            self.period_count += 1
+            
+            # 计算目标价值（复合增长）
+            self.target_value = self.p.initial_target * ((1 + self.p.target_growth) ** self.period_count)
+            
+            # 计算当前投资组合价值
+            current_value = self.broker.getvalue()
+            
+            # 计算需要调整的金额
+            value_diff = self.target_value - current_value
+            
+            if value_diff > 0:
+                # 当前价值低于目标，需要买入
+                shares_to_buy = value_diff / self.data.close[0]
+                if shares_to_buy > 0:
+                    self.buy(size=shares_to_buy)
+            elif value_diff < 0 and self.position:
+                # 当前价值高于目标，需要卖出
+                shares_to_sell = min(abs(value_diff) / self.data.close[0], self.position.size)
+                if shares_to_sell > 0:
+                    self.sell(size=shares_to_sell)
+
+
+class SmileCurve(BaseStrategy):
+    """微笑曲线策略 (Smile Curve Strategy)
+    
+    基于价格相对位置进行投资：
+    - 价格下跌时（相对低位）加大投资力度
+    - 价格上涨时（相对高位）减少投资或获利了结
+    适合波动较大的市场环境。
+    """
+    params = dict(
+        lookback_period=60,  # 回看周期，用于计算价格位置
+        invest_period=10,    # 投资周期
+        base_amount=1000,    # 基础投资金额
+        max_multiplier=3.0   # 最大投资倍数
+    )
+    
+    def __init__(self):
+        super().__init__()
+        self.day_count = 0
+        self.highest = bt.ind.Highest(self.data.close, period=self.p.lookback_period)
+        self.lowest = bt.ind.Lowest(self.data.close, period=self.p.lookback_period)
+        
+    def next(self):
+        if len(self) < self.p.lookback_period:
+            return
+            
+        self.day_count += 1
+        
+        if self.day_count % self.p.invest_period == 0:
+            # 计算当前价格在历史区间中的位置 (0-1)
+            price_range = self.highest[0] - self.lowest[0]
+            if price_range > 0:
+                price_position = (self.data.close[0] - self.lowest[0]) / price_range
+            else:
+                price_position = 0.5  # 如果没有波动，使用中位数
+            
+            # 根据价格位置调整投资金额（价格越低，投资越多）
+            # 使用反向的微笑曲线：低位时投资倍数高，高位时投资倍数低
+            if price_position <= 0.2:
+                # 价格在底部20%，最大投资
+                multiplier = self.p.max_multiplier
+            elif price_position <= 0.4:
+                # 价格在20%-40%，较大投资
+                multiplier = self.p.max_multiplier * 0.8
+            elif price_position <= 0.6:
+                # 价格在40%-60%，正常投资
+                multiplier = 1.0
+            elif price_position <= 0.8:
+                # 价格在60%-80%，减少投资
+                multiplier = 0.5
+            else:
+                # 价格在顶部20%，考虑获利了结
+                if self.position.size > 0:
+                    # 卖出部分持仓
+                    sell_ratio = 0.1  # 卖出10%
+                    shares_to_sell = self.position.size * sell_ratio
+                    self.sell(size=shares_to_sell)
+                return
+            
+            # 执行买入
+            invest_amount = self.p.base_amount * multiplier
+            shares_to_buy = invest_amount / self.data.close[0]
+            self.buy(size=shares_to_buy)
