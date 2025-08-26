@@ -68,24 +68,25 @@ def run_backtest(symbol, strategy_cls, start, end, cash, **kwargs):
     data = bt.feeds.PandasData(dataname=df)
     cerebro.adddata(data)
 
-    # 根据标的选择合适的基准
-    bench_start = df.index[0].strftime("%Y-%m-%d")
-    bench_end = df.index[-1].strftime("%Y-%m-%d")
+    initial_value = cash
+    benchmark_values = []
+    benchmark_dates = []
     
-    # 统一使用标普500作为基准
-    benchmark_symbol = "SPY"
+    if len(df) > 0:
+        # 使用已经处理过股票分割的日收益率来计算基准
+        benchmark_values.append(initial_value)  # 初始值
+        benchmark_dates.append(df.index[0].strftime("%Y-%m-%d"))
+        
+        current_value = initial_value
+        for i in range(1, len(df)):
+            date = df.index[i]
+            # 使用已经处理过股票分割的日收益率
+            daily_return = daily_returns.iloc[i]
+            current_value = current_value * (1 + daily_return)
+            benchmark_values.append(current_value)
+            benchmark_dates.append(date.strftime("%Y-%m-%d"))
     
-    try:
-        bench_df = get_stock_daily(benchmark_symbol, bench_start, bench_end)
-        bench_df["pct"] = bench_df["Close"].pct_change().fillna(0)
-        bench_val = (bench_df["pct"] + 1).cumprod() * 100
-        benchmark_values = bench_val.tolist()
-        benchmark_dates = [d.strftime("%Y-%m-%d") for d in bench_df.index]
-    except Exception as e:
-        # 如果基准数据获取失败，使用空数据
-        print(f"警告：无法获取基准数据 {benchmark_symbol}: {e}")
-        benchmark_values = []
-        benchmark_dates = []
+    logger.info(f"生成买入持有基准数据（已处理股票分割），共 {len(benchmark_values)} 个数据点")
 
     cerebro.addstrategy(strategy_cls, **kwargs)
     cerebro.broker.setcash(cash)
@@ -213,6 +214,108 @@ def main(event, context):
 
 
 if __name__ == '__main__':
+    # AAPL 5年定投策略专项测试
+    import datetime as dt
+    
+    aapl_dca_test = {
+        "name": "AAPL 5年定投策略",
+        "event": {
+            "symbol": "AAPL",
+            "strategy": "DCA",
+            "start": str(dt.date.today() - dt.timedelta(days=5*365)),  # 5年前
+            "end": str(dt.date.today()),
+            "cash": 100000,
+            "params": {
+                "invest_period": 22,    # 每月定投
+                "invest_amount": 1000   # 每次投资1000美元
+            }
+        }
+    }
+    
+    print("="*80)
+    print("🍎 AAPL 5年定投策略专项测试")
+    print("="*80)
+    
+    event = aapl_dca_test['event']
+    print(f"标的: {event['symbol']}")
+    print(f"策略: {event['strategy']} (定投策略)")
+    print(f"时间: {event['start']} 到 {event['end']}")
+    print(f"初始资金: ${event['cash']:,}")
+    print(f"定投周期: 每{event['params']['invest_period']}个交易日 (约每月)")
+    print(f"定投金额: ${event['params']['invest_amount']:,}")
+    
+    try:
+        result = main(event, None)
+        
+        if result['statusCode'] == 200:
+            data = json.loads(result['body'])
+            summary = data['summary']
+            chart = data['chart']
+            
+            print(f"\n📊 AAPL 5年定投策略回测结果:")
+            print(f"总收益率: {summary['total_return']:.2%}")
+            print(f"年化收益率: {summary['annual_return']:.2%}")
+            print(f"最大回撤: {summary['max_drawdown']:.2%}")
+            print(f"夏普比率: {summary['sharpe']:.3f}")
+            print(f"胜率: {summary['win_rate']:.2%}")
+            
+            # 定投特有指标
+            buy_count = len(chart['buy_points'])
+            total_days = len(chart['dates'])
+            expected_buys = total_days // event['params']['invest_period']
+            
+            print(f"\n📈 定投执行情况:")
+            print(f"实际买入次数: {buy_count}")
+            print(f"预期买入次数: {expected_buys}")
+            print(f"总投资金额: ${buy_count * event['params']['invest_amount']:,}")
+            
+            # 计算平均成本
+            if chart['buy_points']:
+                total_cost = buy_count * event['params']['invest_amount']
+                total_shares = sum(event['params']['invest_amount'] / bp['price'] for bp in chart['buy_points'])
+                avg_cost = total_cost / total_shares if total_shares > 0 else 0
+                
+                # 获取最新股价
+                latest_price = chart['buy_points'][-1]['price'] if chart['buy_points'] else 0
+                
+                print(f"平均成本: ${avg_cost:.2f}")
+                print(f"总持有股数: {total_shares:.2f}")
+                print(f"最新股价: ${latest_price:.2f}")
+            else:
+                print(f"平均成本: $0.00 (无买入记录)")
+                print(f"总持有股数: 0.00")
+                print(f"最新股价: $0.00")
+            
+            # 基准对比
+            buy_hold_ret = summary.get('buy_hold_return', 0)
+            strategy_ret = summary['total_return']
+            print(f"\n📊 与买入持有策略对比:")
+            print(f"买入持有收益: {buy_hold_ret:.2%}")
+            print(f"定投策略收益: {strategy_ret:.2%}")
+            excess_return = strategy_ret - buy_hold_ret
+            if excess_return > 0:
+                print(f"✅ 定投策略跑赢买入持有 +{excess_return:.2%}")
+            else:
+                print(f"❌ 定投策略跑输买入持有 {excess_return:.2%}")
+            
+            # 保存结果供plot.py使用
+            with open('aapl_dca_data.json', 'w') as f:
+                json.dump(data, f, indent=2)
+            print(f"\n💾 回测数据已保存到 aapl_dca_data.json")
+            print("可以运行 'python plot.py' 生成可视化图表")
+            
+        else:
+            error_data = json.loads(result['body'])
+            print(f"❌ 测试失败: {error_data['msg']}")
+            
+    except Exception as e:
+        print(f"❌ 测试异常: {str(e)}")
+        import traceback
+        traceback.print_exc()
+    
+    print("\n" + "="*80)
+    print("AAPL 5年定投策略测试完成！")
+    print("="*80)
     
     # 其他策略测试用例
     # test_cases = [
